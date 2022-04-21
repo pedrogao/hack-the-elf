@@ -1,59 +1,37 @@
+use std::{env, error::Error, fs, mem::transmute, ptr::copy_nonoverlapping};
+
 use mmap::{MapOption, MemoryMap};
 use region::{protect, Protection};
-use std::{env, error::Error, fs};
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let input_path = env::args().nth(1).expect("usage: elf FILE");
+    let input_path = env::args().nth(1).expect("usage: elk FILE");
     let input = fs::read(&input_path)?;
+
+    println!("Analyzing {:?}...", input_path);
+
     let file = match delf::File::parse_or_print_error(&input[..]) {
         Some(f) => f,
         None => std::process::exit(1),
     };
     println!("{:#?}", file);
 
-    println!("Disassembling {:?}...", input_path);
-    let code_ph = file
-        .program_headers
-        .iter()
-        .find(|ph| ph.mem_range().contains(&file.entry_point))
-        .expect("segment with entry point not found");
+    let rela_entries = file.read_rela_entries().unwrap_or_else(|e| {
+        println!("Could not read relocations: {:?}", e);
+        Default::default()
+    });
+    let base = 0x400000_usize; // 4KB 仅仅只因为是页大小？看文章而言，这是一个经验值，保证映射到此的代码是可以执行的
 
-    // ndisasm(&code_ph.data[..], file.entry_point)?;
-
-    println!("Dynamic entries:");
-    if let Some(ds) = file
-        .program_headers
-        .iter()
-        .find(|ph| ph.r#type == delf::SegmentType::Dynamic)
-    {
-        if let delf::SegmentContents::Dynamic(ref table) = ds.contents {
-            for entry in table {
-                println!(" - {:?}", entry);
-            }
-        }
-    }
-
-    println!("Rela entries:");
-    let rela_entries = file.read_rela_entries()?;
-    // for e in &rela_entries {
-    //     println!("{:#?}", e);
-    //     if let Some(seg) = file.segment_at(e.offset) {
-    //         println!("... for {:#?}", seg);
-    //     }
-    // }
-
-    // picked by fair 4KiB-aligned dice roll
-    let base = 0x400000_usize;
-    println!("Mapping {:?} in memory...", input_path);
-    let mut mappings = Vec::new();
-    for ph in file
+    println!("Loading with base address @ 0x{:x}", base);
+    let non_empty_load_segments = file
         .program_headers
         .iter()
         .filter(|ph| ph.r#type == delf::SegmentType::Load)
         // ignore zero-length segments
-        .filter(|ph| ph.mem_range().end > ph.mem_range().start)
-    {
-        println!("Mapping segment @ {:?} with {:?}", ph.mem_range(), ph.flags);
+        .filter(|ph| ph.mem_range().end > ph.mem_range().start);
+
+    let mut mappings = Vec::new();
+    for ph in non_empty_load_segments {
+        println!("Mapping {:?} - {:?}", ph.mem_range(), ph.flags);
         let mem_range = ph.mem_range();
         let len: usize = (mem_range.end - mem_range.start).into();
 
@@ -62,38 +40,32 @@ fn main() -> Result<(), Box<dyn Error>> {
         let padding = start - aligned_start;
         let len = len + padding;
 
-        let addr: *mut u8 = unsafe { std::mem::transmute(aligned_start) };
-        println!("Addr: {:p}, Padding: {:08x}", addr, padding);
+        let addr: *mut u8 = unsafe { transmute(aligned_start) };
+        if padding > 0 {
+            println!("(With 0x{:x} bytes of padding at the start)", padding);
+        }
 
         let map = MemoryMap::new(len, &[MapOption::MapWritable, MapOption::MapAddr(addr)])?;
 
-        println!("Copying segment data...");
         unsafe {
-            std::ptr::copy_nonoverlapping(ph.data.as_ptr(), addr.add(padding), len);
+            copy_nonoverlapping(ph.data.as_ptr(), addr.add(padding), len);
         }
 
-        println!("Applying relocations (if any)...");
+        let mut num_relocs = 0;
         for reloc in &rela_entries {
             if mem_range.contains(&reloc.offset) {
+                num_relocs += 1;
                 unsafe {
-                    use std::mem::transmute as trans;
                     let real_segment_start = addr.add(padding);
+                    let offset_into_segment = reloc.offset - mem_range.start;
+                    let reloc_addr = real_segment_start.add(offset_into_segment.into());
 
-                    let specified_reloc_offset = reloc.offset;
-                    let specified_segment_start = mem_range.start;
-                    let offset_into_segment = specified_reloc_offset - specified_segment_start;
-
-                    println!(
-                        "Applying {:?} relocation @ {:?} from segment start",
-                        reloc.r#type, offset_into_segment
-                    );
-
-                    let reloc_addr: *mut u64 =
-                        trans(real_segment_start.add(offset_into_segment.into()));
                     match reloc.r#type {
                         delf::RelType::Relative => {
+                            // this assumes `reloc_addr` is 8-byte aligned. if this isn't
+                            // the case, we would crash, and so would the target executable.
+                            let reloc_addr: *mut u64 = transmute(reloc_addr);
                             let reloc_value = reloc.addend + delf::Addr(base as u64);
-                            println!("Replacing with value {:?}", reloc_value);
                             *reloc_addr = reloc_value.0;
                         }
                         r#type => {
@@ -103,8 +75,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                 }
             }
         }
+        if num_relocs > 0 {
+            println!("(Applied {} relocations)", num_relocs);
+        }
 
-        println!("Adjusting permissions...");
         let mut protection = Protection::NONE;
         for flag in ph.flags.iter() {
             protection |= match flag {
@@ -120,12 +94,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     println!("Jumping to entry point @ {:?}...", file.entry_point);
-    pause("jmp")?;
     unsafe {
-        // jmp(file.entry_point.0 as _);
-        // jmp((file.entry_point.0 as usize + base) as _);
-        jmp(std::mem::transmute(file.entry_point.0 as usize + base));
+        jmp(transmute(file.entry_point.0 as usize + base));
     }
+
     Ok(())
 }
 
@@ -135,6 +107,7 @@ unsafe fn jmp(addr: *const u8) {
 }
 
 // And this little helper function is new as well!
+#[allow(unused)]
 fn pause(reason: &str) -> Result<(), Box<dyn Error>> {
     println!("Press Enter to {}...", reason);
     {
@@ -151,6 +124,7 @@ fn align_lo(x: usize) -> usize {
     x & !0xFFF
 }
 
+#[allow(unused)]
 fn ndisasm(code: &[u8], origin: delf::Addr) -> Result<(), Box<dyn Error>> {
     use std::{
         io::Write,

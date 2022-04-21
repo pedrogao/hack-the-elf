@@ -159,13 +159,18 @@ pub enum DynamicTag {
     FiniArray = 26,
     InitArraySz = 27,
     FiniArraySz = 28,
-    LoOs = 0x60000000,
-    HiOs = 0x6fffffff,
-    LoProc = 0x70000000,
-    HiProc = 0x7fffffff,
+
+    Flags = 30,
+    // As it turns out, `LoOs` and `HiOs` were the minimum and maximum values
+    // for operating system specific tags. And there's a bunch of those..
     GnuHash = 0x6ffffef5,
+    VerSym = 0x6ffffff0,
+    RelaCount = 0x6ffffff9,
     Flags1 = 0x6ffffffb,
-    RelACount = 0x6ffffff9,
+    VerDef = 0x6ffffffc,
+    VerDefNum = 0x6ffffffd,
+    VerNeed = 0x6ffffffe,
+    VerNeedNum = 0x6fffffff,
 }
 
 impl_parse_for_enum!(DynamicTag, le_u64);
