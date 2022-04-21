@@ -27,6 +27,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6245d59a3e82a7fc217c5828a6692dbc6dfb63a0c8c90495621f7b9d79704a0e"
 
 [[package]]
+name = "custom_debug_derive"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9b35d34eb004bf2d33c093f1c55ee77829e8654644288d3b6afd8c2d99d23729"
+dependencies = [
+ "proc-macro2",
+ "syn",
+ "synstructure",
+]
+
+[[package]]
 name = "delf"
 version = "0.1.0"
 dependencies = [
@@ -65,6 +76,7 @@ dependencies = [
 name = "elk"
 version = "0.1.0"
 dependencies = [
+ "custom_debug_derive",
  "delf",
  "mmap",
  "region",
@@ -268,6 +280,18 @@ checksum = "b683b2b825c8eef438b77c36a06dc262294da3d5a5813fac20da149241dcd44d"
 dependencies = [
  "proc-macro2",
  "quote",
+ "unicode-xid",
+]
+
+[[package]]
+name = "synstructure"
+version = "0.12.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f36bdaa60a83aca3921b5259d5400cbf5e90fc51931376a9bd4a0eb79aa7210f"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
  "unicode-xid",
 ]
 

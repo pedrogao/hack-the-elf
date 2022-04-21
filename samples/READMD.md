@@ -124,3 +124,28 @@ Disassembly of section .text:
 ```
 
 PIE(Position Independent code)的核心在于，使用 rip 寄存器来制造相对跳转，待链接时再使用真实的物理地址。
+
+```sh
+$ nasm -f elf64 hello-dl.asm
+$ nasm -f elf64 msg.asm
+$ file {hello-dl,msg}.o
+hello-dl.o: ELF 64-bit LSB relocatable, x86-64, version 1 (SYSV), not stripped
+msg.o:      ELF 64-bit LSB relocatable, x86-64, version 1 (SYSV), not stripped
+
+$ ld --dynamic-linker /lib/ld-linux.so.2 hello-dl.o msg.o -o hello-dl
+$ file hello-dl
+hello-dl: ELF 64-bit LSB executable, x86-64, version 1 (SYSV), statically linked, not stripped
+$ ./hello-dl
+hi there
+```
+
+```sh
+$ ldd ../elk/target/debug/elk
+        linux-vdso.so.1 =>  (0x00007ffca29c9000)
+        /$LIB/libonion.so => /lib64/libonion.so (0x00007f85d9f2a000)
+        libc.so.6 => /lib64/libc.so.6 (0x00007f85d97b0000)
+        /lib64/ld-linux-x86-64.so.2 (0x00007f85d9e11000)
+        libgcc_s.so.1 => /lib64/libgcc_s.so.1 (0x00007f85d959a000)
+        libpthread.so.0 => /lib64/libpthread.so.0 (0x00007f85d937e000)
+        libdl.so.2 => /lib64/libdl.so.2 (0x00007f85d917a000)
+```
