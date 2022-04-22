@@ -87,6 +87,14 @@ impl Addr {
         use nom::{combinator::map, number::complete::le_u64};
         map(le_u64, From::from)(i)
     }
+
+    pub unsafe fn as_ptr<T>(&self) -> *const T {
+        std::mem::transmute(self.0 as usize)
+    }
+
+    pub unsafe fn as_mut_ptr<T>(&self) -> *mut T {
+        std::mem::transmute(self.0 as usize)
+    }
 }
 
 pub struct HexDump<'a>(&'a [u8]);
