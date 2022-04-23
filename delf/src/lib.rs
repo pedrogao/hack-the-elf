@@ -7,20 +7,14 @@ use derive_more::*;
 use derive_try_from_primitive::TryFromPrimitive;
 use enumflags2::*;
 
-#[derive(thiserror::Error, Debug)]
+#[derive(Error, Debug)]
 pub enum ReadRelaError {
-    #[error("Rela dynamic entry not found")]
-    RelaNotFound,
-    #[error("RelaSz dynamic entry not found")]
-    RelaSzNotFound,
+    #[error("{0}")]
+    DynamicEntryNotFound(#[from] GetDynamicEntryError),
     #[error("Rela segment not found")]
     RelaSegmentNotFound,
-    #[error("Parsing error")]
-    ParsingError(parse::ErrorKind),
-    #[error("RelaEnt dynamic entry not found")]
-    RelaEntNotFound,
-    #[error("RelaSeg dynamic entry not found")]
-    RelaSegNotFound,
+    #[error("Parsing error: {0}")]
+    ParsingError(String),
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -45,13 +39,19 @@ pub enum ReadSymsError {
     ParsingError(parse::ErrorKind),
 }
 
+#[derive(thiserror::Error, Debug)]
+pub enum GetDynamicEntryError {
+    #[error("Dynamic entry {0:?} not found")]
+    NotFound(DynamicTag),
+}
+
 // "Add" and "Sub" are in `derive_more`
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Add, Sub)]
 pub struct Addr(pub u64);
 
 impl fmt::Debug for Addr {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{:08x}", self.0)
+        write!(f, "{:016x}", self.0)
     }
 }
 
@@ -94,6 +94,22 @@ impl Addr {
 
     pub unsafe fn as_mut_ptr<T>(&self) -> *mut T {
         std::mem::transmute(self.0 as usize)
+    }
+
+    pub unsafe fn as_slice<T>(&mut self, len: usize) -> &[T] {
+        std::slice::from_raw_parts(self.as_ptr(), len)
+    }
+
+    pub unsafe fn as_mut_slice<T>(&self, len: usize) -> &mut [T] {
+        std::slice::from_raw_parts_mut(self.as_mut_ptr(), len)
+    }
+
+    pub unsafe fn write(&self, src: &[u8]) {
+        std::ptr::copy_nonoverlapping(src.as_ptr(), self.as_mut_ptr(), src.len());
+    }
+
+    pub unsafe fn set<T>(&self, src: T) {
+        *self.as_mut_ptr() = src;
     }
 }
 
@@ -194,8 +210,6 @@ pub enum DynamicTag {
     FiniArraySz = 28,
 
     Flags = 30,
-    // As it turns out, `LoOs` and `HiOs` were the minimum and maximum values
-    // for operating system specific tags. And there's a bunch of those..
     GnuHash = 0x6ffffef5,
     VerSym = 0x6ffffff0,
     RelaCount = 0x6ffffff9,
@@ -239,6 +253,7 @@ pub enum KnownRelType {
 }
 
 impl_parse_for_enum!(KnownRelType, le_u32);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RelType {
     Known(KnownRelType),
@@ -264,6 +279,8 @@ pub struct Rela {
 }
 
 impl Rela {
+    const SIZE: usize = 24;
+
     pub fn parse(i: parse::Input) -> parse::Result<Self> {
         use nom::{combinator::map, number::complete::le_u32, sequence::tuple};
         map(
@@ -286,6 +303,8 @@ pub enum SymBind {
     Weak = 2,
 }
 
+impl_parse_for_bitenum!(SymBind, 4_usize);
+
 #[derive(Debug, TryFromPrimitive, Clone, Copy)]
 #[repr(u8)]
 pub enum SymType {
@@ -295,19 +314,21 @@ pub enum SymType {
     Section = 3,
 }
 
-impl SymBind {
-    pub fn parse(i: parse::BitInput) -> parse::BitResult<Option<Self>> {
-        use nom::{bits::complete::take, combinator::map};
-        map(take(4_usize), |i: u8| Self::try_from(i).ok())(i)
-    }
-}
+impl_parse_for_bitenum!(SymType, 4_usize);
 
-impl SymType {
-    pub fn parse(i: parse::BitInput) -> parse::BitResult<Option<Self>> {
-        use nom::{bits::complete::take, combinator::map};
-        map(take(4_usize), |i: u8| Self::try_from(i).ok())(i)
-    }
-}
+// impl SymBind {
+//     pub fn parse(i: parse::BitInput) -> parse::BitResult<Option<Self>> {
+//         use nom::{bits::complete::take, combinator::map};
+//         map(take(4_usize), |i: u8| Self::try_from(i).ok())(i)
+//     }
+// }
+
+// impl SymType {
+//     pub fn parse(i: parse::BitInput) -> parse::BitResult<Option<Self>> {
+//         use nom::{bits::complete::take, combinator::map};
+//         map(take(4_usize), |i: u8| Self::try_from(i).ok())(i)
+//     }
+// }
 
 #[derive(Clone, Copy)]
 pub struct SectionIndex(pub u16);
@@ -344,9 +365,9 @@ impl fmt::Debug for SectionIndex {
 
 #[derive(Debug)]
 pub struct Sym {
+    pub bind: SymBind,
+    pub r#type: SymType,
     pub name: Addr,
-    pub bind: Option<SymBind>,
-    pub r#type: Option<SymType>,
     pub shndx: SectionIndex,
     pub value: Addr,
     pub size: u64,
@@ -616,27 +637,28 @@ impl File {
     }
 
     pub fn read_rela_entries(&self) -> Result<Vec<Rela>, ReadRelaError> {
-        // see https://blog.rust-lang.org/2019/08/15/Rust-1.37.0.html#referring-to-enum-variants-through-type-aliases
         use DynamicTag as DT;
         use ReadRelaError as E;
 
-        let addr = self.dynamic_entry(DT::Rela).ok_or(E::RelaNotFound)?;
-        let len = self.dynamic_entry(DT::RelaSz).ok_or(E::RelaSzNotFound)?;
-        let ent = self.dynamic_entry(DT::RelaEnt).ok_or(E::RelaEntNotFound)?;
-        let i = self.slice_at(addr).ok_or(E::RelaSegmentNotFound)?;
-        let i = &i[..len.into()];
-        let n = (len.0 / ent.0) as usize;
+        match self.dynamic_entry(DT::Rela) {
+            None => Ok(vec![]),
+            Some(addr) => {
+                let len = self.get_dynamic_entry(DT::RelaSz)?;
 
-        use nom::multi::many_m_n;
-        match many_m_n(n, n, Rela::parse)(i) {
-            Ok((_, rela_entries)) => Ok(rela_entries),
-            Err(nom::Err::Failure(err)) | Err(nom::Err::Error(err)) => {
-                let e = &err.errors[0];
-                let (_input, error_kind) = e;
-                Err(E::ParsingError(error_kind.clone()))
+                let i = self.slice_at(addr).ok_or(E::RelaSegmentNotFound)?;
+                let i = &i[..len.into()];
+
+                let n: usize = len.0 as usize / Rela::SIZE;
+                match nom::multi::many_m_n(n, n, Rela::parse)(i) {
+                    Ok((_, rela_entries)) => Ok(rela_entries),
+                    Err(nom::Err::Failure(err)) | Err(nom::Err::Error(err)) => {
+                        let e = &err.errors[0];
+                        let (_input, error_kind) = e;
+                        Err(E::ParsingError(error_kind.clone()))
+                    }
+                    _ => unreachable!(),
+                }
             }
-            // we don't use any "streaming" parsers, so `nom::Err::Incomplete` seems unlikely
-            _ => unreachable!(),
         }
     }
 
@@ -724,6 +746,11 @@ impl File {
             // we don't use any "streaming" parsers, so.
             _ => unreachable!(),
         }
+    }
+
+    pub fn get_dynamic_entry(&self, tag: DynamicTag) -> Result<Addr, GetDynamicEntryError> {
+        self.dynamic_entry(tag)
+            .ok_or(GetDynamicEntryError::NotFound(tag))
     }
 }
 

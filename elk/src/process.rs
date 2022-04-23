@@ -116,7 +116,10 @@ impl Process {
             .ok_or(LoadError::NoLoadSegments)?;
 
         let mem_size: usize = (mem_range.end - mem_range.start).into();
-        let mem_map = std::mem::ManuallyDrop::new(MemoryMap::new(mem_size, &[])?);
+        let mem_map = std::mem::ManuallyDrop::new(MemoryMap::new(
+            mem_size,
+            &[MapOption::MapReadable, MapOption::MapWritable],
+        )?);
         let base = delf::Addr(mem_map.data() as _) - mem_range.start;
 
         if path.to_str().unwrap().ends_with("libmsg.so") {
@@ -134,38 +137,38 @@ impl Process {
         };
 
         let segments = load_segments()
-            .filter_map(|ph| {
-                if ph.memsz.0 > 0 {
-                    let vaddr = delf::Addr(ph.vaddr.0 & !0xFFF);
-                    let padding = ph.vaddr - vaddr;
-                    let offset = ph.offset - padding;
-                    let memsz = ph.memsz + padding;
-                    let map_res = MemoryMap::new(
-                        memsz.into(),
-                        &[
-                            // those are new
-                            MapOption::MapReadable,
-                            MapOption::MapWritable,
-                            MapOption::MapFd(fs_file.as_raw_fd()),
-                            MapOption::MapOffset(offset.into()),
-                            MapOption::MapAddr(unsafe { (base + vaddr).as_ptr() }),
-                        ],
-                    );
-                    Some(map_res.map(|map| {
-                        dump_maps(&format!(
-                            "after mapping {:?} segment to {:?}",
-                            path,
-                            (base + vaddr)..(base + vaddr + memsz)
-                        ));
-                        Segment {
-                            map,
-                            padding,
-                            flags: ph.flags,
+            .filter(|ph| ph.memsz.0 > 0)
+            .map(|ph| -> Result<_, LoadError> {
+                let vaddr = delf::Addr(ph.vaddr.0 & !0xFFF);
+                let padding = ph.vaddr - vaddr;
+                let offset = ph.offset - padding;
+                let filesz = ph.filesz + padding;
+                let map = MemoryMap::new(
+                    filesz.into(),
+                    &[
+                        MapOption::MapReadable,
+                        MapOption::MapWritable,
+                        MapOption::MapFd(fs_file.as_raw_fd()),
+                        MapOption::MapOffset(offset.into()),
+                        MapOption::MapAddr(unsafe { (base + vaddr).as_ptr() }),
+                    ],
+                )?;
+
+                if ph.memsz > ph.filesz {
+                    let mut zero_start = base + ph.mem_range().start + ph.filesz;
+                    let zero_len = ph.memsz - ph.filesz;
+                    unsafe {
+                        for i in zero_start.as_mut_slice::<u8>(zero_len.into()) {
+                            *i = 0u8;
                         }
-                    }))
-                } else {
-                    None
+                    }
                 }
+
+                Ok(Segment {
+                    map,
+                    padding,
+                    flags: ph.flags,
+                })
             })
             .collect::<Result<Vec<_>, _>>()?;
 
