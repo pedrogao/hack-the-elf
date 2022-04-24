@@ -7,7 +7,7 @@ use derive_more::*;
 use derive_try_from_primitive::TryFromPrimitive;
 use enumflags2::*;
 
-#[derive(Error, Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum ReadRelaError {
     #[error("{0}")]
     DynamicEntryNotFound(#[from] GetDynamicEntryError),
@@ -27,16 +27,20 @@ pub enum GetStringError {
     StringNotFound,
 }
 
+// #[derive(Error, Debug)]
 #[derive(thiserror::Error, Debug)]
 pub enum ReadSymsError {
-    #[error("SymTab dynamic entry not found")]
-    SymTabNotFound,
+    #[error("{0:?}")]
+    DynamicEntryNotFound(#[from] GetDynamicEntryError),
+
     #[error("SymTab section not found")]
     SymTabSectionNotFound,
+
     #[error("SymTab segment not found")]
     SymTabSegmentNotFound,
-    #[error("Parsing error")]
-    ParsingError(parse::ErrorKind),
+
+    #[error("Parsing error: {0}")]
+    ParsingError(String),
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -96,7 +100,7 @@ impl Addr {
         std::mem::transmute(self.0 as usize)
     }
 
-    pub unsafe fn as_slice<T>(&mut self, len: usize) -> &[T] {
+    pub unsafe fn as_slice<T>(&self, len: usize) -> &[T] {
         std::slice::from_raw_parts(self.as_ptr(), len)
     }
 
@@ -254,21 +258,17 @@ pub enum KnownRelType {
 
 impl_parse_for_enum!(KnownRelType, le_u32);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, TryFromPrimitive, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
 pub enum RelType {
-    Known(KnownRelType),
-    Unknown(u32),
+    _64 = 1,
+    Copy = 5,
+    GlobDat = 6,
+    JumpSlot = 7,
+    Relative = 8,
 }
 
-impl RelType {
-    pub fn parse(i: parse::Input) -> parse::Result<Self> {
-        use nom::{branch::alt, combinator::map, number::complete::le_u32};
-        alt((
-            map(KnownRelType::parse, Self::Known),
-            map(le_u32, Self::Unknown),
-        ))(i)
-    }
-}
+impl_parse_for_enum!(RelType, le_u32);
 
 #[derive(Debug)]
 pub struct Rela {
@@ -316,20 +316,6 @@ pub enum SymType {
 
 impl_parse_for_bitenum!(SymType, 4_usize);
 
-// impl SymBind {
-//     pub fn parse(i: parse::BitInput) -> parse::BitResult<Option<Self>> {
-//         use nom::{bits::complete::take, combinator::map};
-//         map(take(4_usize), |i: u8| Self::try_from(i).ok())(i)
-//     }
-// }
-
-// impl SymType {
-//     pub fn parse(i: parse::BitInput) -> parse::BitResult<Option<Self>> {
-//         use nom::{bits::complete::take, combinator::map};
-//         map(take(4_usize), |i: u8| Self::try_from(i).ok())(i)
-//     }
-// }
-
 #[derive(Clone, Copy)]
 pub struct SectionIndex(pub u16);
 
@@ -363,7 +349,7 @@ impl fmt::Debug for SectionIndex {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Sym {
     pub bind: SymBind,
     pub r#type: SymType,
@@ -652,9 +638,7 @@ impl File {
                 match nom::multi::many_m_n(n, n, Rela::parse)(i) {
                     Ok((_, rela_entries)) => Ok(rela_entries),
                     Err(nom::Err::Failure(err)) | Err(nom::Err::Error(err)) => {
-                        let e = &err.errors[0];
-                        let (_input, error_kind) = e;
-                        Err(E::ParsingError(error_kind.clone()))
+                        Err(E::ParsingError(format!("{:?}", err)))
                     }
                     _ => unreachable!(),
                 }
@@ -713,8 +697,6 @@ impl File {
         let slice = self
             .slice_at(addr + offset)
             .ok_or(E::StrTabSegmentNotFound)?;
-        // Our strings are null-terminated, so we (lazily) split the slice into
-        // slices separated by '\0' and take the first item
         let string_slice = slice.split(|&c| c == 0).next().ok_or(E::StringNotFound)?;
         Ok(String::from_utf8_lossy(string_slice).into())
     }
@@ -727,7 +709,7 @@ impl File {
         use DynamicTag as DT;
         use ReadSymsError as E;
 
-        let addr = self.dynamic_entry(DT::SymTab).ok_or(E::SymTabNotFound)?;
+        let addr = self.get_dynamic_entry(DT::SymTab)?;
         let section = self
             .section_starting_at(addr)
             .ok_or(E::SymTabSectionNotFound)?;
@@ -739,11 +721,8 @@ impl File {
         match many_m_n(n, n, Sym::parse)(i) {
             Ok((_, syms)) => Ok(syms),
             Err(nom::Err::Failure(err)) | Err(nom::Err::Error(err)) => {
-                let e = &err.errors[0];
-                let (_input, error_kind) = e;
-                Err(E::ParsingError(error_kind.clone()))
+                Err(E::ParsingError(format!("{:?}", err)))
             }
-            // we don't use any "streaming" parsers, so.
             _ => unreachable!(),
         }
     }
