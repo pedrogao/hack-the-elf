@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+
 mod name;
 mod process;
 mod procfs;
@@ -42,11 +43,16 @@ struct AutosymArgs {
 }
 
 #[derive(FromArgs, PartialEq, Debug)]
-#[argh(description = "Load and run an ELF executable")]
 #[argh(subcommand, name = "run")]
+/// Load and run an ELF executable
 struct RunArgs {
     #[argh(positional)]
+    /// the absolute path of an executable file to load and run
     exec_path: String,
+
+    #[argh(positional)]
+    /// arguments for the executable file
+    args: Vec<String>,
 }
 
 fn main() {
@@ -222,13 +228,31 @@ fn cmd_dig(args: DigArgs) -> Result<(), Box<dyn Error>> {
 
 fn cmd_run(args: RunArgs) -> Result<(), Box<dyn Error>> {
     let mut proc = process::Process::new();
-    let exec_index = proc.load_object_and_dependencies(args.exec_path)?;
+    let exec_index = proc.load_object_and_dependencies(&args.exec_path)?;
     proc.apply_relocations()?;
     proc.adjust_protections()?;
 
-    let exec_obj = &proc.objects[exec_index];
-    let entry_point = exec_obj.file.entry_point + exec_obj.base;
-    unsafe { jmp(entry_point.as_ptr()) };
+    // we'll need those to handle C-style strings (null-terminated)
+    use std::ffi::CString;
+
+    let exec = &proc.objects[exec_index];
+    let args = std::iter::once(CString::new(args.exec_path.as_bytes()).unwrap())
+        .chain(
+            args.args
+                .iter()
+                .map(|s| CString::new(s.as_bytes()).unwrap()),
+        )
+        .collect();
+
+    let opts = process::StartOptions {
+        exec,
+        args,
+        env: std::env::vars()
+            .map(|(k, v)| CString::new(format!("{}={}", k, v).as_bytes()).unwrap())
+            .collect(),
+        auxv: process::Auxv::get_known(),
+    };
+    proc.start(&opts);
 
     Ok(())
 }
