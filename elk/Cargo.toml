@@ -6,10 +6,12 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+argh = "0.1"
 custom_debug_derive = "0.5"
 delf = { path = "../delf" }
 enumflags2 = "0.6"
 mmap = "0.1"
 multimap = "0.8"
+nom = "5"
 region = "2"
 thiserror = "1"

@@ -139,7 +139,7 @@ impl Process {
             .map_err(|e| LoadError::IO(path.clone(), e))?;
 
         println!("Loading {:?}", path);
-        let file = delf::File::parse_or_print_error(&input[..])
+        let file = delf::File::parse_or_print_error(input)
             .ok_or_else(|| LoadError::ParseError(path.clone()))?;
 
         let origin = path
@@ -149,15 +149,11 @@ impl Process {
             .ok_or_else(|| LoadError::InvalidPath(path.clone()))?;
         self.search_path.extend(
             file.dynamic_entry_strings(delf::DynamicTag::RPath)
+                .map(|path| String::from_utf8_lossy(path)) // new
                 .map(|path| path.replace("$ORIGIN", &origin))
                 .inspect(|path| println!("Found RPATH entry {:?}", path))
                 .map(PathBuf::from),
         );
-
-        let deps: Vec<_> = file
-            .dynamic_entry_strings(delf::DynamicTag::Needed)
-            .collect();
-
         let mem_range = file
             .program_headers
             .iter()
@@ -227,23 +223,28 @@ impl Process {
             .collect::<Result<Vec<_>, _>>()?;
 
         let index = self.objects.len();
-        let syms = file.read_syms()?;
-        let strtab = file
-            .get_dynamic_entry(delf::DynamicTag::StrTab)
-            .unwrap_or_else(|_| panic!("String table not found in {:?}", path));
-        let syms: Vec<_> = syms
-            .into_iter()
-            .map(|sym| unsafe {
-                let name = Name::from_addr(base + strtab + sym.name);
-                NamedSym { sym, name }
-            })
-            .collect();
+        let syms = file.read_dynsym_entries()?;
+        let syms: Vec<_> = if syms.is_empty() {
+            vec![]
+        } else {
+            let strtab = file
+                .get_dynamic_entry(delf::DynamicTag::StrTab)
+                .unwrap_or_else(|_| panic!("String table not found in {:?}", path));
+            syms.into_iter()
+                .map(|sym| unsafe {
+                    let name = Name::from_addr(base + strtab + sym.name);
+                    NamedSym { sym, name }
+                })
+                .collect()
+        };
         let mut sym_map = MultiMap::new();
         for sym in &syms {
             sym_map.insert(sym.name.clone(), sym.clone())
         }
 
-        let rels = file.read_rela_entries()?;
+        let mut rels = Vec::new();
+        rels.extend(file.read_rela_entries()?);
+        rels.extend(file.read_jmp_rel_entries()?);
 
         let object = Object {
             path: path.clone(),
@@ -259,9 +260,6 @@ impl Process {
         self.objects.push(object);
         self.objects_by_path.insert(path, index);
 
-        for dep in deps {
-            self.get_object(&dep)?;
-        }
         Ok(index)
     }
 
@@ -333,6 +331,11 @@ impl Process {
             RT::Relative => unsafe {
                 objrel.addr().set(obj.base + addend);
             },
+            RT::IRelative => unsafe {
+                let selector: extern "C" fn() -> delf::Addr =
+                    std::mem::transmute(obj.base + addend);
+                objrel.addr().set(selector());
+            },
             RT::Copy => unsafe {
                 objrel.addr().write(found.value().as_slice(found.size()));
             },
@@ -369,6 +372,7 @@ impl Process {
                 .into_iter()
                 .map(|index| &self.objects[index].file)
                 .flat_map(|file| file.dynamic_entry_strings(Needed))
+                .map(|s| String::from_utf8_lossy(s).to_string())
                 .collect::<Vec<_>>()
                 .into_iter()
                 .map(|dep| self.get_object(&dep))
@@ -411,7 +415,7 @@ pub struct Object {
     pub path: PathBuf,
     pub base: delf::Addr,
     #[debug(skip)]
-    pub file: delf::File,
+    pub file: delf::File<Vec<u8>>,
     pub mem_range: Range<delf::Addr>,
     pub segments: Vec<Segment>,
     #[debug(skip)]
