@@ -2,14 +2,12 @@ use enumflags2::BitFlags;
 use mmap::{MapOption, MemoryMap};
 use multimap::MultiMap;
 
+use std::cmp::{max, min};
 use std::collections::HashMap;
 use std::io::Read;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::{
-    cmp::{max, min},
-    ops::Range,
-};
+use std::{ops::Range, sync::Arc};
 
 use crate::name::Name;
 
@@ -87,12 +85,12 @@ pub enum LoadError {
 
 #[derive(thiserror::Error, Debug)]
 pub enum RelocationError {
-    #[error("unimplemented relocation: {0:?}")]
-    UnimplementedRelocation(delf::RelType),
+    #[error("{0:?}: unimplemented relocation type {1:?}")]
+    UnimplementedRelocation(PathBuf, delf::RelType),
     #[error("unknown symbol number: {0}")]
     UnknownSymbolNumber(u32),
-    #[error("undefined symbol: {0}")]
-    UndefinedSymbol(String),
+    #[error("undefined symbol: {0:?}")]
+    UndefinedSymbol(NamedSym),
 }
 
 pub enum GetResult {
@@ -215,7 +213,8 @@ impl Process {
                 }
 
                 Ok(Segment {
-                    map,
+                    map: Arc::new(map),
+                    vaddr_range: vaddr..(ph.vaddr + ph.memsz),
                     padding,
                     flags: ph.flags,
                 })
@@ -227,12 +226,21 @@ impl Process {
         let syms: Vec<_> = if syms.is_empty() {
             vec![]
         } else {
-            let strtab = file
+            let dynstr = file
                 .get_dynamic_entry(delf::DynamicTag::StrTab)
                 .unwrap_or_else(|_| panic!("String table not found in {:?}", path));
+            let segment = segments
+                .iter()
+                .find(|seg| seg.vaddr_range.contains(&dynstr))
+                .unwrap_or_else(|| panic!("Segment not found for string table in {:#?}", path));
+
             syms.into_iter()
-                .map(|sym| unsafe {
-                    let name = Name::from_addr(base + strtab + sym.name);
+                .map(|sym| {
+                    let name = Name::mapped(
+                        &segment.map,
+                        // a little bit of maths can't hurt
+                        (dynstr + sym.name - segment.vaddr_range.start).into(),
+                    );
                     NamedSym { sym, name }
                 })
                 .collect()
@@ -318,7 +326,7 @@ impl Process {
             _ => match self.lookup_symbol(&wanted, ignore_self) {
                 undef @ ResolvedSym::Undefined => match wanted.sym.sym.bind {
                     delf::SymBind::Weak => undef,
-                    _ => return Err(RelocationError::UndefinedSymbol(format!("{:?}", wanted))),
+                    _ => return Err(RelocationError::UndefinedSymbol(wanted.sym.clone())),
                 },
                 x => x,
             },
@@ -332,14 +340,16 @@ impl Process {
                 objrel.addr().set(obj.base + addend);
             },
             RT::IRelative => unsafe {
-                let selector: extern "C" fn() -> delf::Addr =
-                    std::mem::transmute(obj.base + addend);
+                type Selector = unsafe extern "C" fn() -> delf::Addr;
+                let selector: Selector = std::mem::transmute(obj.base + addend);
                 objrel.addr().set(selector());
             },
             RT::Copy => unsafe {
                 objrel.addr().write(found.value().as_slice(found.size()));
             },
-            _ => return Err(RelocationError::UnimplementedRelocation(reltype)),
+            RT::GlobDat | RT::JumpSlot => unsafe {
+                objrel.addr().set(found.value());
+            },
         }
         Ok(())
     }
@@ -364,7 +374,7 @@ impl Process {
         path: P,
     ) -> Result<usize, LoadError> {
         let index = self.load_object(path)?;
-
+        // TODO fix
         let mut a = vec![index];
         while !a.is_empty() {
             use delf::DynamicTag::Needed;
@@ -405,7 +415,8 @@ impl Process {
 #[derive(custom_debug_derive::Debug)]
 pub struct Segment {
     #[debug(skip)]
-    pub map: MemoryMap,
+    pub map: Arc<MemoryMap>,
+    pub vaddr_range: Range<delf::Addr>,
     pub padding: delf::Addr,
     pub flags: BitFlags<delf::SegmentFlag>,
 }
@@ -424,6 +435,7 @@ pub struct Object {
     pub sym_map: MultiMap<Name, NamedSym>,
     #[debug(skip)]
     pub rels: Vec<delf::Rela>,
+    // pub names: Vec<Name>,
 }
 
 fn convex_hull(a: Range<delf::Addr>, b: Range<delf::Addr>) -> Range<delf::Addr> {
