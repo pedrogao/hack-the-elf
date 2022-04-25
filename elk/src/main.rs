@@ -229,13 +229,15 @@ fn cmd_dig(args: DigArgs) -> Result<(), Box<dyn Error>> {
 fn cmd_run(args: RunArgs) -> Result<(), Box<dyn Error>> {
     let mut proc = process::Process::new();
     let exec_index = proc.load_object_and_dependencies(&args.exec_path)?;
-    proc.apply_relocations()?;
-    proc.adjust_protections()?;
 
-    // we'll need those to handle C-style strings (null-terminated)
+    proc.patch_libc();
+    let proc = proc.allocate_tls();
+    let proc = proc.apply_relocations()?;
+    let proc = proc.initialize_tls();
+    let proc = proc.adjust_protections()?;
+
     use std::ffi::CString;
 
-    let exec = &proc.objects[exec_index];
     let args = std::iter::once(CString::new(args.exec_path.as_bytes()).unwrap())
         .chain(
             args.args
@@ -245,7 +247,8 @@ fn cmd_run(args: RunArgs) -> Result<(), Box<dyn Error>> {
         .collect();
 
     let opts = process::StartOptions {
-        exec,
+        // we no longer borrow `exec` here, we just pass the index
+        exec_index,
         args,
         env: std::env::vars()
             .map(|(k, v)| CString::new(format!("{}={}", k, v).as_bytes()).unwrap())

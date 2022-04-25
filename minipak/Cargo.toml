@@ -1,0 +1,15 @@
+[workspace]
+members = [
+    "crates/encore",
+    "crates/pixie",
+    "crates/minipak",
+    "crates/stage1",
+]
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+debug = true
+lto = "thin"
+panic = "abort"

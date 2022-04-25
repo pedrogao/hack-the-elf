@@ -1,0 +1,12 @@
+[package]
+name = "pixie"
+version = "0.1.0"
+authors = ["pedrogao <pedrogao@tencent.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+deku = { version = "0.11.0", default-features = false, features = ["alloc"] }
+encore = { path = "../encore" }
+displaydoc = { version = "0.1.7", default-features = false }
