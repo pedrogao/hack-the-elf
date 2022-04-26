@@ -1,42 +1,49 @@
-// Opt out of libstd
 #![no_std]
-// Let us worry about the entry point.
 #![no_main]
-// Use the default allocation error handler
 #![feature(default_alloc_error_handler)]
-// Let us make functions without any prologue - assembly only!
 #![feature(naked_functions)]
-// Let us use inline assembly!
 #![feature(asm)]
-// Let us pass arguments to the linker directly
 #![feature(link_args)]
 
-/// Don't link any glibc stuff, also, make this executable static.
 #[allow(unused_attributes)]
 #[link_args = "-nostartfiles -nodefaultlibs -static"]
 extern "C" {}
 
-/// Our entry point.
 #[naked]
 #[no_mangle]
 unsafe extern "C" fn _start() {
     asm!("mov rdi, rsp", "call pre_main", options(noreturn))
 }
 
+extern crate alloc;
+
+macro_rules! info {
+    ($($tokens: tt)*) => {
+        println!("[stage1] {}", alloc::format!($($tokens)*));
+    }
+}
+
 use encore::prelude::*;
 use pixie::{Manifest, PixieError};
+
+extern "C" {
+    fn i_do_not_exist();
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn entry() {
+    i_do_not_exist();
+}
 
 #[no_mangle]
 unsafe fn pre_main(stack_top: *mut u8) {
     init_allocator();
-    main(Env::read(stack_top)).unwrap();
+    main(stack_top, Env::read(stack_top)).unwrap();
     syscall::exit(0);
 }
 
 #[allow(clippy::unnecessary_wraps)]
-fn main(env: Env) -> Result<(), PixieError> {
-    println!("Hello from stage1!");
-
+fn main(stack_top: *mut u8, _env: Env) -> Result<(), PixieError> {
     let host = File::open("/proc/self/exe")?;
     let host = host.map()?;
     let host = host.as_ref();
@@ -49,46 +56,26 @@ fn main(env: Env) -> Result<(), PixieError> {
     let uncompressed_guest =
         lz4_flex::decompress_size_prepended(guest_slice).expect("invalid lz4 payload");
 
-    let tmp_path = "/tmp/minipak-guest";
-    {
-        let mut guest = File::create(tmp_path, 0o755)?;
-        guest.write_all(&uncompressed_guest[..])?;
+    let guest_obj = Object::new(&uncompressed_guest[..])?;
+
+    let guest_mapped = MappedObject::new(&guest_obj, None)?;
+    info!("Mapped guest at 0x{:x}", guest_mapped.base());
+
+    // Set phdr auxiliary vector
+    let at_phdr = env.find_vector(AuxvType::PHDR);
+    at_phdr.value = guest_mapped.base() + guest_obj.header().ph_offset;
+
+    // Set phnum auxiliary vector
+    let at_phnum = env.find_vector(AuxvType::PHNUM);
+    at_phnum.value = guest_obj.header().ph_count as _;
+
+    // Set entry auxiliary vector
+    let at_entry = env.find_vector(AuxvType::ENTRY);
+    at_entry.value = guest_mapped.base_offset() + guest_obj.header().entry_point;
+
+    let entry_point = guest_mapped.base() + guest_obj.header().entry_point;
+    info!("Jumping to guest's entry point 0x{:x}", entry_point);
+    unsafe {
+        pixie::launch(stack_top, entry_point);
     }
-
-    {
-        extern crate alloc;
-        // Make sure the path to execute is null-terminated
-        let tmp_path_nullter = format!("{}\0", tmp_path);
-        // Forward arguments and environment.
-        let argv: Vec<*const u8> = env
-            .args
-            .iter()
-            .copied()
-            .map(str::as_ptr)
-            .chain(core::iter::once(core::ptr::null()))
-            .collect();
-        let envp: Vec<*const u8> = env
-            .vars
-            .iter()
-            .copied()
-            .map(str::as_ptr)
-            .chain(core::iter::once(core::ptr::null()))
-            .collect();
-
-        unsafe {
-            asm!(
-                "syscall",
-                in("rax") 59, // `execve` syscall
-                in("rdi") tmp_path_nullter.as_ptr(), // `filename`
-                in("rsi") argv.as_ptr(), // `argv`
-                in("rdx") envp.as_ptr(), // `envp`
-                options(noreturn),
-            )
-        }
-    }
-
-    // If we comment that out, we get an error. If we don't, we get a warning.
-    // Let's just allow the warning.
-    #[allow(unreachable_code)]
-    Ok(())
 }

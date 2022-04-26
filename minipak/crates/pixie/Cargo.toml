@@ -10,3 +10,4 @@ edition = "2018"
 deku = { version = "0.11.0", default-features = false, features = ["alloc"] }
 encore = { path = "../encore" }
 displaydoc = { version = "0.1.7", default-features = false }
+derivative = { version = "2.2.0", features = ["use_core"] }

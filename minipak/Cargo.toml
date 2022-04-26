@@ -4,6 +4,7 @@ members = [
     "crates/pixie",
     "crates/minipak",
     "crates/stage1",
+    "crates/stage2",
 ]
 
 [profile.dev]

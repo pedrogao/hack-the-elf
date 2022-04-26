@@ -4,11 +4,16 @@ use std::{
 };
 
 fn main() {
+    for &arg in &["-nostartfiles", "-nodefaultlibs", "-static"] {
+        println!("cargo:rustc-link-arg={}", arg);
+    }
+
     cargo_build(&PathBuf::from("../stage1"));
+    cargo_build(&PathBuf::from("../stage2"));
 }
 
 fn cargo_build(path: &Path) {
-    println!("cargo:rerun-if-changed={}", path.display());
+    println!("cargo:rerun-if-changed=..");
 
     let out_dir = std::env::var("OUT_DIR").unwrap();
     let target_dir = format!("{}/embeds", out_dir);
@@ -32,12 +37,11 @@ fn cargo_build(path: &Path) {
         );
     }
 
-    // Let's just assume the binary has the same name as the crate
-    let binary_name = path.file_name().unwrap().to_str().unwrap();
+    let lib_name = format!("lib{}.so", path.file_name().unwrap().to_str().unwrap());
     let output = Command::new("objcopy")
         .arg("--strip-all")
-        .arg(&format!("release/{}", binary_name))
-        .arg(binary_name)
+        .arg(&format!("release/{}", lib_name))
+        .arg(lib_name)
         .current_dir(&target_dir)
         .spawn()
         .unwrap()

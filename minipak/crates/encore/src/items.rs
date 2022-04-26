@@ -6,7 +6,7 @@ use linked_list_allocator::LockedHeap;
 static ALLOCATOR: LockedHeap = LockedHeap::empty();
 
 /// Heap size, in megabytes
-const HEAP_SIZE_MB: u64 = 128;
+const HEAP_SIZE_MB: u64 = 512;
 
 /// Initialize a global allocator that only uses `mmap`, with a fixed heap size.
 ///

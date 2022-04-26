@@ -84,6 +84,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "derivative"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fcc3dd5e9e9c0b295d6e1e4d811fb6f157d5ffd784b8d202fc62eac8035a770b"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "displaydoc"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -151,6 +162,7 @@ checksum = "05304f8e67dfc93d1b4b990137fd1a7a4c6ad44b60a9c486c8c4486f9d2027ae"
 name = "minipak"
 version = "0.1.0"
 dependencies = [
+ "displaydoc",
  "encore",
  "lz4_flex",
  "pixie",
@@ -161,6 +173,7 @@ name = "pixie"
 version = "0.1.0"
 dependencies = [
  "deku",
+ "derivative",
  "displaydoc",
  "encore",
 ]
@@ -212,6 +225,15 @@ dependencies = [
 
 [[package]]
 name = "stage1"
+version = "0.1.0"
+dependencies = [
+ "encore",
+ "lz4_flex",
+ "pixie",
+]
+
+[[package]]
+name = "stage2"
 version = "0.1.0"
 dependencies = [
  "encore",
